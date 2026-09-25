@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rocketnow-cli"
+version = "0.1.0"
+description = "A local CLI for a Rocket Now account"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=43"]
+
+[project.scripts]
+rocketnow = "rocketnow_cli.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"rocketnow_cli.assets" = ["*.js"]

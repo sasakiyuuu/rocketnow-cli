@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ -d "$project_dir/.deps" ]; then
+  PYTHONPATH="$project_dir/src:$project_dir/.deps${PYTHONPATH:+:$PYTHONPATH}"
+else
+  PYTHONPATH="$project_dir/src${PYTHONPATH:+:$PYTHONPATH}"
+fi
+export PYTHONPATH
+exec python3 -m rocketnow_cli.cli "$@"
