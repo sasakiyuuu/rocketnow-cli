@@ -19,13 +19,15 @@ python -m pip install -e .
 rocketnow --help
 ```
 
-`auth login` のブラウザ方式を試す場合だけNode.js、Playwright、Chromeが必要です。リポジトリ内で `npm install` を実行し、`ROCKETNOW_PLAYWRIGHT_ROOT` をこのリポジトリの絶対パスに設定します。この方式はSSOから403が返る環境があり、現在は実験的です。
+`auth login` のブラウザ方式を試す場合だけNode.js、Playwright、Chromeが必要です。リポジトリ内で `npm install` を実行し、`ROCKETNOW_PLAYWRIGHT_ROOT` をこのリポジトリの絶対パスに設定します。`ROCKETNOW_BROWSER=webkit` を使う場合は `npx playwright install webkit` も実行します。ログイン初期画面は開きますが、MacのChromeとWebKitではSMS認証画面がSSOから403で拒否されました。現在この方式だけでのログインは完了していません。
 
 ## 認証
 
 APIはP-256鍵によるDPoP署名を使います。アクセストークンは公開鍵に結び付くため、アプリのトークンをコピーするだけではCLIから使えません。
 
 `rocketnow auth pair-proxy` はMacの8082番で専用プロキシを起動します。iPhoneのWi-Fi HTTPプロキシを一時的にそのMacへ向け、アプリでログアウト・再ログインすると、CLI用の鍵に結び付いたセッションを保存します。ペアリング直後のアプリは再ログインが必要になる場合があります。完了後はiPhoneのプロキシを**元の設定**へ戻してください。
+
+現在確認済みのCLI認証方法は `auth pair-proxy` です。`auth login` はSSO側の拒否が解消するまで実験的です。
 
 セッションは `~/Library/Application Support/rocketnow-cli/session.json` に0600権限で保存します。トークンと秘密鍵を含むので共有しないでください。観測したアクセストークンの有効期間は4時間で、自動更新APIは未確認です。失効後は再認証します。
 

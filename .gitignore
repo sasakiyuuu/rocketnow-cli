@@ -1,5 +1,7 @@
 .deps/
 .venv/
+.playwright-browsers/
+ios_auth_helper/
 node_modules/
 __pycache__/
 *.egg-info/

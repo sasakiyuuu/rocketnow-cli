@@ -2,10 +2,13 @@
 
 import base64
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 from rocketnow_cli.auth import LoginFlow, Session, load_session, save_session
@@ -23,12 +26,16 @@ class AuthTests(unittest.TestCase):
         params = parse_qs(parsed.query)
         self.assertEqual(parsed.hostname, "member.rocketnow.co.jp")
         self.assertEqual(params["state"], [flow.state])
+        self.assertRegex(flow.state, re.compile(r"^[0-9a-f]{64}$"))
         self.assertEqual(params["nonce"], [flow.nonce])
         self.assertEqual(
             params["code_challenge"],
             [b64url(hashlib.sha256(flow.verifier.encode()).digest())],
         )
         self.assertEqual(params["code_challenge_method"], ["S256"])
+        client_info = json.loads(params["client_info"][0])
+        self.assertEqual(client_info["deviceId"], flow.device_id)
+        self.assertEqual(client_info["pcid"], flow.pcid)
 
     def test_state_mismatch_stops_before_network(self):
         with self.assertRaisesRegex(ValueError, "state mismatch"):
@@ -45,6 +52,15 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(loaded.access_token, "fake-token")
             self.assertEqual(loaded.signer.public_jwk(), flow.signer.public_jwk())
             self.assertEqual(loaded.expires_at, 1_900_000_000)
+
+    def test_exchange_keeps_login_device_identity(self):
+        flow = LoginFlow()
+        token = "h." + b64url(json.dumps({"exp": 1_900_000_000}).encode()) + ".s"
+        response = {"rData": {"accessToken": token, "tokenType": "DPoP"}}
+        with patch("rocketnow_cli.auth.request.urlopen", return_value=BytesIO(json.dumps(response).encode())):
+            session = flow.exchange("example-code", flow.state)
+        self.assertEqual(session.device_id, flow.device_id)
+        self.assertEqual(session.pcid, flow.pcid)
 
 
 if __name__ == "__main__":

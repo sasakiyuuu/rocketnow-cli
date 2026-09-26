@@ -37,37 +37,41 @@ def jwt_exp(access_token: str) -> int:
 class LoginFlow:
     def __init__(self) -> None:
         self.verifier = _b64url(secrets.token_bytes(48))
-        self.state = _b64url(secrets.token_bytes(24))
-        self.nonce = _b64url(secrets.token_bytes(24))
+        self.state = secrets.token_hex(32)
+        self.nonce = _b64url(secrets.token_bytes(16))
         self.signer = DPoPSigner.generate()
+        self.device_id = secrets.token_urlsafe(41)
+        self.pcid = str(uuid.uuid4())
+        self.app_uuid = str(uuid.uuid4())
+        self.member_pcid = str(secrets.randbelow(9 * 10**22) + 10**22)
+        self.app_session_id = str(uuid.uuid4())
 
     def landing_url(self) -> str:
         challenge = _b64url(hashlib.sha256(self.verifier.encode()).digest())
-        device_id = secrets.token_urlsafe(41)
-        pcid = str(uuid.uuid4())
         ios_version = os.environ.get("ROCKETNOW_IOS_VERSION", "26.6.1")
         app_version = os.environ.get("ROCKETNOW_APP_VERSION", "1.15.0")
+        app_build = int(os.environ.get("ROCKETNOW_APP_BUILD", "328257"))
         client_info = {
-            "deviceId": device_id,
+            "deviceId": self.device_id,
             "timeZone": "Asia/Tokyo",
-            "pcid": pcid,
+            "pcid": self.pcid,
             "autoLogin": "Y",
-            "uuid": str(uuid.uuid4()),
+            "uuid": self.app_uuid,
             "appVersion": app_version,
             "appName": "eats",
             "networkType": "WiFi",
             "deviceDensity": "X3",
             "osType": "iOS",
             "resolutionType": "402x874",
-            "memberPcid": str(secrets.randbelow(9 * 10**22) + 10**22),
-            "deviceModel": "iPhone18,1",
+            "memberPcid": self.member_pcid,
+            "deviceModel": "iPhone",
             "osVersion": ios_version,
         }
         event_time = datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="milliseconds")
         log_info = {
             "common": {
                 "eventTime": event_time,
-                "pcid": pcid,
+                "pcid": self.pcid,
                 "libraryVersion": "2.0.0",
                 "appCode": "rocketnow",
                 "market": "JP",
@@ -79,13 +83,13 @@ class LoginFlow:
                 "app": {
                     "appVersionName": app_version,
                     "osVersion": ios_version,
-                    "appVersionCode": app_version,
+                    "appVersionCode": app_build,
                     "model": "iPhone18,1",
                     "uuid": str(uuid.uuid4()),
                 },
             },
             "extra": {
-                "appSessionId": str(uuid.uuid4()),
+                "appSessionId": self.app_session_id,
                 "app_lang": "system_default",
                 "userBenefitType": "NON_LOGIN",
             },
@@ -143,7 +147,10 @@ class LoginFlow:
         data = result.get("rData") or {}
         if not data.get("accessToken") or data.get("tokenType") != "DPoP":
             raise RuntimeError("Token exchange failed: " + str(result.get("rMessage", "unknown error")))
-        return Session(data["accessToken"], self.signer, jwt_exp(data["accessToken"]))
+        return Session(
+            data["accessToken"], self.signer, jwt_exp(data["accessToken"]),
+            self.device_id, self.pcid,
+        )
 
 
 class Session:
