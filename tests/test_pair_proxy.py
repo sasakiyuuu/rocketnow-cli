@@ -24,10 +24,10 @@ def fake_token(exp: int = 1_900_000_000) -> str:
 
 
 class FakeRequest:
-    def __init__(self, method="POST", url=pair_proxy.EXCHANGE_URL):
+    def __init__(self, method="POST", url=pair_proxy.EXCHANGE_URL, headers=None):
         self.method = method
         self.url = url
-        self.headers = {"DPoP": "original-proof"}
+        self.headers = {"DPoP": "original-proof", **(headers or {})}
 
 
 class FakeResponse:
@@ -43,6 +43,26 @@ class FakeFlow:
         self.request = request or FakeRequest()
         self.response = response
         self.metadata = {}
+
+
+class FakeTimer:
+    def __init__(self, callback):
+        self.callback = callback
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+
+class FakeLoop:
+    def __init__(self):
+        self.delay = None
+        self.timer = None
+
+    def call_later(self, delay, callback):
+        self.delay = delay
+        self.timer = FakeTimer(callback)
+        return self.timer
 
 
 class PairProxyTests(unittest.TestCase):
@@ -111,6 +131,91 @@ class PairProxyTests(unittest.TestCase):
         retry = FakeFlow()
         addon.request(retry)
         self.assertEqual(retry.request.headers["DPoP"], "original-proof")
+
+    def test_success_copies_available_request_identity_headers(self):
+        addon = pair_proxy.PairProxy()
+        flow = FakeFlow(
+            request=FakeRequest(headers={
+                "x-eats-device-id": "captured-device",
+                "X-Eats-Pcid": "captured-pcid",
+                "x-eats-session-id": "captured-app-session",
+                "X-Member-Pcid": "captured-member-pcid",
+            }),
+            response=FakeResponse(fake_token()),
+        )
+        addon.request(flow)
+        with patch.object(pair_proxy, "save_session") as save:
+            addon.response(flow)
+        session = save.call_args.args[0]
+        self.assertEqual(session.device_id, "captured-device")
+        self.assertEqual(session.pcid, "captured-pcid")
+        self.assertEqual(session.app_session_id, "captured-app-session")
+        self.assertEqual(session.member_pcid, "captured-member-pcid")
+        self.assertEqual(len(session.token_binding), 22)
+
+    def test_followup_captures_binding_only_for_issued_token(self):
+        addon = pair_proxy.PairProxy()
+        loop = FakeLoop()
+        token = fake_token()
+        exchange = FakeFlow(response=FakeResponse(token))
+        addon.request(exchange)
+        with (
+            patch.object(pair_proxy, "save_session") as save,
+            patch.object(pair_proxy.asyncio, "get_running_loop", return_value=loop),
+            patch.object(addon, "_shutdown") as shutdown,
+        ):
+            addon.response(exchange)
+            self.assertEqual(save.call_count, 1)
+            self.assertEqual(loop.delay, pair_proxy._FOLLOWUP_TIMEOUT_SECONDS)
+            shutdown.assert_not_called()
+
+            for url, authorization in (
+                ("https://other.example/endpoint/account.me", "DPoP " + token),
+                ("https://csg.rocketnow.co.jp/endpoint/account.me", "DPoP other-token"),
+            ):
+                addon.request(FakeFlow(FakeRequest(url=url, headers={
+                    "Authorization": authorization,
+                    "X-Coupang-Sec-Token-Binding": "wrong-binding",
+                })))
+            self.assertEqual(save.call_count, 1)
+
+            addon.request(FakeFlow(FakeRequest(
+                method="GET",
+                url="https://csg.rocketnow.co.jp/endpoint/account.me",
+                headers={
+                    "Authorization": "DPoP " + token,
+                    "x-coupang-sec-token-binding": "captured-binding",
+                    "X-Eats-Device-Id": "later-device",
+                    "X-Eats-Pcid": "later-pcid",
+                    "X-Eats-Session-Id": "later-session",
+                    "X-Member-Pcid": "later-member",
+                },
+            )))
+            self.assertEqual(save.call_count, 2)
+            session = save.call_args.args[0]
+            self.assertEqual(session.token_binding, "captured-binding")
+            self.assertEqual(session.device_id, "later-device")
+            self.assertEqual(session.pcid, "later-pcid")
+            self.assertEqual(session.app_session_id, "later-session")
+            self.assertEqual(session.member_pcid, "later-member")
+            self.assertTrue(loop.timer.cancelled)
+            shutdown.assert_called_once()
+
+    def test_followup_timeout_stops_proxy_without_second_save(self):
+        addon = pair_proxy.PairProxy()
+        loop = FakeLoop()
+        exchange = FakeFlow(response=FakeResponse(fake_token()))
+        addon.request(exchange)
+        with (
+            patch.object(pair_proxy, "save_session") as save,
+            patch.object(pair_proxy.asyncio, "get_running_loop", return_value=loop),
+            patch.object(addon, "_shutdown") as shutdown,
+        ):
+            addon.response(exchange)
+            loop.timer.callback()
+            self.assertEqual(save.call_count, 1)
+            self.assertIsNone(addon.session)
+            shutdown.assert_called_once()
 
 
 if __name__ == "__main__":

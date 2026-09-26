@@ -36,6 +36,7 @@ def _parser() -> argparse.ArgumentParser:
     auth_sub.add_parser("login")
     auth_sub.add_parser("pair-proxy", help="Pair this CLI with a login from the phone through a dedicated proxy")
     auth_sub.add_parser("status")
+    auth_sub.add_parser("refresh", help="Renew an expired bound session when the API offers rotation")
 
     config = sub.add_parser("config", help="Inspect or import local payment setup")
     config_sub = config.add_subparsers(dest="action", required=True)
@@ -263,7 +264,26 @@ def run(args: argparse.Namespace) -> object:
         if args.action == "pair-proxy":
             return _auth_pair_proxy()
         session = load_session()
-        return {"authenticated": not session.expired, "expiresAt": datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat()}
+        if args.action == "refresh":
+            refreshed = HTTPTransport(session).refresh()
+            return {
+                "authenticated": not session.expired,
+                "refreshed": refreshed,
+                "expiresAt": datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat(),
+            }
+        renewal_error = None
+        if session.expired:
+            try:
+                HTTPTransport(session).refresh()
+            except RuntimeError as exc:
+                renewal_error = str(exc)
+        status = {
+            "authenticated": not session.expired,
+            "expiresAt": datetime.fromtimestamp(session.expires_at, timezone.utc).isoformat(),
+        }
+        if renewal_error:
+            status["renewalError"] = renewal_error
+        return status
     if args.command == "config":
         if args.action == "import-payment":
             password = os.environ.get("ROCKETNOW_MITMWEB_PASSWORD") or getpass.getpass("Local mitmweb password: ")

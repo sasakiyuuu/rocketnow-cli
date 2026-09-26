@@ -150,6 +150,8 @@ class LoginFlow:
         return Session(
             data["accessToken"], self.signer, jwt_exp(data["accessToken"]),
             self.device_id, self.pcid,
+            app_session_id=self.app_session_id,
+            member_pcid=self.member_pcid,
         )
 
 
@@ -161,16 +163,22 @@ class Session:
         expires_at: int,
         device_id: str | None = None,
         pcid: str | None = None,
+        token_binding: str | None = None,
+        app_session_id: str | None = None,
+        member_pcid: str | None = None,
     ) -> None:
         self.access_token = access_token
         self.signer = signer
         self.expires_at = expires_at
         self.device_id = device_id or secrets.token_urlsafe(41)
         self.pcid = pcid or str(uuid.uuid4())
+        self.token_binding = token_binding or _b64url(secrets.token_bytes(16))
+        self.app_session_id = app_session_id
+        self.member_pcid = member_pcid
 
     @property
     def expired(self) -> bool:
-        return time.time() >= self.expires_at - 60
+        return time.time() >= self.expires_at
 
 
 def session_path() -> Path:
@@ -190,6 +198,9 @@ def save_session(session: Session, path: Path | None = None) -> Path:
         "expires_at": session.expires_at,
         "device_id": session.device_id,
         "pcid": session.pcid,
+        "token_binding": session.token_binding,
+        "app_session_id": session.app_session_id,
+        "member_pcid": session.member_pcid,
     }
     fd, temp_name = tempfile.mkstemp(prefix=".session-", dir=target.parent)
     try:
@@ -214,7 +225,10 @@ def load_session(path: Path | None = None) -> Session:
         int(data["expires_at"]),
         data.get("device_id"),
         data.get("pcid"),
+        data.get("token_binding"),
+        data.get("app_session_id"),
+        data.get("member_pcid"),
     )
-    if not data.get("device_id") or not data.get("pcid"):
+    if not data.get("device_id") or not data.get("pcid") or not data.get("token_binding"):
         save_session(session, target)
     return session

@@ -1,6 +1,7 @@
 """Offline transport checks for signed requests and endpoint allowlisting."""
 
 import base64
+import hashlib
 from io import BytesIO
 import json
 import time
@@ -17,7 +18,19 @@ def decode_part(value):
 
 
 class Response(BytesIO):
-    pass
+    def __init__(self, body, headers=None):
+        super().__init__(body)
+        self.headers = headers or {}
+
+
+def token(payload):
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    return "eyJhbGciOiJFUzI1NiJ9." + encoded + ".signature"
+
+
+def thumbprint(signer):
+    jwk = json.dumps(signer.public_jwk(), sort_keys=True, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(hashlib.sha256(jwk).digest()).rstrip(b"=").decode()
 
 
 class TransportTests(unittest.TestCase):
@@ -37,6 +50,7 @@ class TransportTests(unittest.TestCase):
         req = send.call_args.args[0]
         self.assertIn("keyWord=", req.full_url)
         self.assertEqual(req.get_header("Authorization"), "DPoP fake-access-token")
+        self.assertEqual(req.get_header("X-coupang-sec-token-binding"), self.session.token_binding)
         proof = req.get_header("Dpop") or req.get_header("DPoP")
         payload = decode_part(proof.split(".")[1])
         self.assertEqual(payload["htm"], "GET")
@@ -52,12 +66,90 @@ class TransportTests(unittest.TestCase):
                 self.transport.request("POST", "/auth/exchange_token", json_body={})
             send.assert_not_called()
 
-    def test_expired_session_is_rejected_before_network(self):
-        self.session.expires_at = int(time.time()) - 1
+    def test_refresh_skips_network_until_token_expires(self):
         with patch("rocketnow_cli.transport.request.urlopen") as send:
-            with self.assertRaisesRegex(RuntimeError, "Session expired"):
-                self.transport.request("GET", "/endpoint/account.member")
+            self.assertFalse(self.transport.refresh())
             send.assert_not_called()
+
+    def test_expired_session_tries_harmless_refresh_then_stops_without_rotation(self):
+        self.session.expires_at = int(time.time()) - 1
+        with patch("rocketnow_cli.transport.request.urlopen", return_value=Response(b'{"data":{}}')) as send:
+            with self.assertRaisesRegex(RuntimeError, "renewal was not offered"):
+                self.transport.request("GET", "/endpoint/account.member")
+            send.assert_called_once()
+            self.assertTrue(send.call_args.args[0].full_url.endswith("/endpoint/account.get_default_address"))
+
+    def test_expired_session_rotates_before_the_requested_endpoint(self):
+        now = int(time.time())
+        old_claims = {
+            "iss": "https://mauth.jp.coupang.net/", "aud": ["https://www.rocketnow.co.jp"],
+            "sub": "account", "client_id": "client", "cnf": {"jkt": thumbprint(self.session.signer)},
+            "auth_time": now - 14_500, "scp": ["offline", "eats"],
+            "iat": now - 14_410, "exp": now - 10,
+        }
+        new_claims = dict(old_claims, iat=now, exp=now + 14_400)
+        old_token, new_token = token(old_claims), token(new_claims)
+        self.session.access_token = old_token
+        self.session.expires_at = old_claims["exp"]
+        responses = [
+            Response(b'{"data":{}}', {"Authorization": "DPoP " + new_token}),
+            Response(b'{"data":{"ok":true}}'),
+        ]
+        with patch("rocketnow_cli.transport.request.urlopen", side_effect=responses) as send, \
+             patch("rocketnow_cli.transport.save_session") as save:
+            result = self.transport.request("GET", "/endpoint/account.member")
+        self.assertEqual(result["data"], {"ok": True})
+        self.assertEqual(send.call_count, 2)
+        self.assertTrue(send.call_args_list[0].args[0].full_url.endswith("/endpoint/account.get_default_address"))
+        self.assertTrue(send.call_args_list[1].args[0].full_url.endswith("/endpoint/account.member"))
+        self.assertEqual(send.call_args_list[1].args[0].get_header("Authorization"), "DPoP " + new_token)
+        self.assertEqual(self.session.expires_at, now + 14_400)
+        save.assert_called_once_with(self.session)
+
+    def test_rotation_rejects_token_bound_to_another_key(self):
+        now = int(time.time())
+        claims = {
+            "iss": "issuer", "aud": ["audience"], "sub": "account", "client_id": "client",
+            "auth_time": now - 14_500, "scp": ["offline", "eats"],
+            "cnf": {"jkt": thumbprint(self.session.signer)}, "iat": now - 14_410, "exp": now - 10,
+        }
+        self.session.access_token = token(claims)
+        self.session.expires_at = claims["exp"]
+        wrong = token(dict(claims, cnf={"jkt": "wrong-key"}, iat=now, exp=now + 14_400))
+        with patch("rocketnow_cli.transport.request.urlopen", return_value=Response(
+            b'{"data":{}}', {"Authorization": "DPoP " + wrong}
+        )), patch("rocketnow_cli.transport.save_session") as save:
+            with self.assertRaisesRegex(RuntimeError, "renewal was not offered"):
+                self.transport.request("GET", "/endpoint/account.member")
+        save.assert_not_called()
+
+    def test_refresh_tries_observed_splash_endpoint_when_address_does_not_rotate(self):
+        now = int(time.time())
+        claims = {
+            "iss": "issuer", "aud": ["audience"], "sub": "account", "client_id": "client",
+            "auth_time": now - 14_500, "scp": ["offline", "eats"],
+            "cnf": {"jkt": thumbprint(self.session.signer)}, "iat": now - 14_410, "exp": now - 10,
+        }
+        self.session.access_token = token(claims)
+        self.session.expires_at = claims["exp"]
+        newer = token(dict(claims, iat=now, exp=now + 14_400))
+        address = {"data": {"regionId": 1, "latitude": 35.0, "longitude": 139.0,
+                            "siDo": "東京都", "siGunGu": "千代田区", "zipCode": "1000000",
+                            "customerAddressId": 2}}
+        responses = [
+            Response(json.dumps(address).encode()),
+            Response(b'{"data":{}}', {"Authorization": "DPoP " + newer}),
+            Response(b'{"data":{"ok":true}}'),
+        ]
+        with patch("rocketnow_cli.transport.request.urlopen", side_effect=responses) as send, \
+             patch("rocketnow_cli.transport.save_session"):
+            self.assertTrue(self.transport.request("GET", "/endpoint/account.member")["data"]["ok"])
+        self.assertEqual(send.call_count, 3)
+        splash = send.call_args_list[1].args[0]
+        self.assertTrue(splash.full_url.endswith("/endpoint/ads.splash_screen"))
+        self.assertEqual(json.loads(splash.data), {"regionId": 1})
+        self.assertEqual(json.loads(splash.get_header("X-eats-location"))["regionId"], 1)
+        self.assertEqual(send.call_args_list[2].args[0].get_header("Authorization"), "DPoP " + newer)
 
 
 if __name__ == "__main__":
