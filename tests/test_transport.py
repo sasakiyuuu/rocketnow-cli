@@ -71,6 +71,20 @@ class TransportTests(unittest.TestCase):
             self.assertFalse(self.transport.refresh())
             send.assert_not_called()
 
+    def test_prepay_carries_observed_device_cookie_and_json_charset(self):
+        self.transport._location = {"regionId": 1, "latitude": 35.0, "longitude": 139.0}
+        with patch("rocketnow_cli.transport.request.urlopen", return_value=Response(b'{"data":{}}')) as send:
+            self.transport.request("POST", "/endpoint/checkout.prepay", json_body={"requestedAmount": 1000})
+        req = send.call_args.args[0]
+        self.assertEqual(req.get_header("Cookie"), "x-eats-uuid=" + self.session.device_id)
+        self.assertEqual(req.get_header("Content-type"), "application/json; charset=utf-8")
+
+    def test_payment_methods_read_carries_device_cookie(self):
+        self.transport._location = {"regionId": 1, "latitude": 35.0, "longitude": 139.0}
+        with patch("rocketnow_cli.transport.request.urlopen", return_value=Response(b'{"data":{"payMethodList":[]}}')) as send:
+            self.transport.request("GET", "/endpoint/checkout.get_payment_methods")
+        self.assertEqual(send.call_args.args[0].get_header("Cookie"), "x-eats-uuid=" + self.session.device_id)
+
     def test_expired_session_tries_harmless_refresh_then_stops_without_rotation(self):
         self.session.expires_at = int(time.time()) - 1
         with patch("rocketnow_cli.transport.request.urlopen", return_value=Response(b'{"data":{}}')) as send:

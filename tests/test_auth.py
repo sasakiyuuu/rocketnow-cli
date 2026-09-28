@@ -56,6 +56,8 @@ class AuthTests(unittest.TestCase):
             self.assertRegex(loaded.token_binding, re.compile(r"^[A-Za-z0-9_-]{22}$"))
             self.assertIsNone(loaded.app_session_id)
             self.assertIsNone(loaded.member_pcid)
+            self.assertIsNone(loaded.access_token_hash)
+            self.assertIsNone(loaded.sso_auth_header)
 
     def test_legacy_session_load_generates_and_persists_binding(self):
         flow = LoginFlow()
@@ -81,12 +83,15 @@ class AuthTests(unittest.TestCase):
         session = Session(
             "fake-token", flow.signer, 1_900_000_000,
             "device", "pcid", "binding", "app-session", "member-pcid",
+            access_token_hash="example-hash", sso_auth_header="example-sso",
         )
         with tempfile.TemporaryDirectory() as directory:
             loaded = load_session(save_session(session, Path(directory) / "session.json"))
         self.assertEqual(loaded.token_binding, "binding")
         self.assertEqual(loaded.app_session_id, "app-session")
         self.assertEqual(loaded.member_pcid, "member-pcid")
+        self.assertEqual(loaded.access_token_hash, "example-hash")
+        self.assertEqual(loaded.sso_auth_header, "example-sso")
 
     def test_exchange_keeps_login_device_identity(self):
         flow = LoginFlow()
@@ -98,6 +103,27 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(session.pcid, flow.pcid)
         self.assertEqual(session.app_session_id, flow.app_session_id)
         self.assertEqual(session.member_pcid, flow.member_pcid)
+
+    def test_exchange_extracts_optional_legacy_credentials_without_rejecting_login(self):
+        token = "h." + b64url(json.dumps({"exp": 1_900_000_000}).encode()) + ".s"
+        for legacy, expected in (
+            ({"ssoAuthHeader": "example-sso", "unrelated": "ignored"}, "example-sso"),
+            (json.dumps({"ssoAuthHeader": "example-sso"}), "example-sso"),
+            ("invalid-json", None),
+            ("[]", None),
+            ({"ssoAuthHeader": 123}, None),
+            (None, None),
+        ):
+            with self.subTest(legacy=legacy):
+                flow = LoginFlow()
+                response = {"rData": {
+                    "accessToken": token, "tokenType": "DPoP",
+                    "accessTokenHash": "example-hash", "legacySessionInfo": legacy,
+                }}
+                with patch("rocketnow_cli.auth.request.urlopen", return_value=BytesIO(json.dumps(response).encode())):
+                    session = flow.exchange("example-code", flow.state)
+                self.assertEqual(session.access_token_hash, "example-hash")
+                self.assertEqual(session.sso_auth_header, expected)
 
 
 if __name__ == "__main__":

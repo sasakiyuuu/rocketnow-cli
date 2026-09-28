@@ -139,11 +139,12 @@ def build_prepay_request(
     draft: dict[str, Any],
     payment_config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build the observed GP_CARD prepay body after a fresh checkout preview."""
+    """Build the observed saved-card or PayPay body after checkout preview."""
     if checkout_request.get("orderType") != "DELIVERY":
         raise ValueError("Only DELIVERY orders have been observed")
-    if checkout_request.get("payMethodCode") != "GP_CARD":
-        raise ValueError("Only saved-card payment has been observed")
+    payment_code = checkout_request.get("payMethodCode")
+    if payment_code not in ("GP_CARD", "PAYPAY"):
+        raise ValueError("Only saved-card and PayPay payment have been observed")
 
     amount = preview.get("requestedAmount")
     if not isinstance(amount, (int, float)) or amount <= 0 or int(amount) != amount:
@@ -173,29 +174,45 @@ def build_prepay_request(
         selected_id = int(selected_id)
     matches = [
         item for item in methods
-        if item.get("payMethodCode") == "GP_CARD"
+        if item.get("payMethodCode") == payment_code
         and (selected_id is None or item.get("payMethodId") == selected_id)
     ]
-    if len(matches) != 1 or not matches[0].get("payMethodId") or not matches[0].get("maskingPayMethodNumber"):
-        raise ValueError("No saved card is available")
+    if len(matches) != 1:
+        raise ValueError("Choose exactly one payment method")
     method = matches[0]
+    if payment_code == "GP_CARD" and (not method.get("payMethodId") or not method.get("maskingPayMethodNumber")):
+        raise ValueError("No saved card is available")
+    payment = {
+        "savePaymentOption": True,
+        "payMethodCorporateCode": method["payMethodCode"],
+        "merchantMallKey": merchant_key,
+        "serviceTypeCode": "DELIVERY",
+        "maskingPayMethodNumber": method.get("maskingPayMethodNumber") or "",
+        "payMethodName": method["payMethodName"],
+        "payMethodTypeCode": method["payMethodType"],
+    }
+    if payment_code == "GP_CARD":
+        payment["payMethodId"] = method["payMethodId"]
+
+    coupon_fields = (
+        "couponId", "description", "discountPrice", "layer", "stampReward",
+        "type", "userPromotionId",
+    )
+    coupons = [
+        {key: coupon[key] for key in coupon_fields if key in coupon}
+        for coupon in preview.get("coupons") or []
+    ]
+    for coupon in coupons:
+        if coupon.get("description") is None:
+            coupon["description"] = ""
 
     return {
         "searchIds": search_id,
-        "payment": {
-            "payMethodId": method["payMethodId"],
-            "savePaymentOption": True,
-            "payMethodCorporateCode": method["payMethodCode"],
-            "merchantMallKey": merchant_key,
-            "serviceTypeCode": "DELIVERY",
-            "maskingPayMethodNumber": method["maskingPayMethodNumber"],
-            "payMethodName": method["payMethodName"],
-            "payMethodTypeCode": method["payMethodType"],
-        },
+        "payment": payment,
         "items": checkout_request["items"],
         "pickupOrder": False,
         "deliveryType": delivery_type,
-        "coupons": checkout_request["coupons"],
+        "coupons": coupons,
         "deviceInfo": {
             "uuid": session.pcid,
             "deviceType": "IOS_APP",

@@ -5,6 +5,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from rocketnow_cli.cli import _checked_address, _confirm_order, _submit_order, run
+from rocketnow_cli.transport import RocketNowHTTPError
+from rocketnow_cli.api import RocketNowAPIError
 
 
 class OrderCommandTests(unittest.TestCase):
@@ -62,6 +64,22 @@ class OrderCommandTests(unittest.TestCase):
                 _submit_order(self.api, object(), self.args)
         self.assertEqual(update.call_args.args[1]["status"], "requires_reconciliation")
 
+    def test_failed_submission_keeps_status_without_replay(self):
+        self.api.prepay.side_effect = RocketNowHTTPError(400)
+        with patch("rocketnow_cli.cli._json_file", return_value={"searchId": "s", "searchJourneyId": "j"}), \
+             patch("rocketnow_cli.cli._build_purchase_review", return_value=({"requestedAmount": 2400}, self.review)), \
+             patch("rocketnow_cli.cli.verify_review"), \
+             patch("rocketnow_cli.cli.create_pending_order"), \
+             patch("rocketnow_cli.cli.consume_review"), \
+             patch("rocketnow_cli.cli.load_pending_order", return_value={"status": "submitting"}), \
+             patch("rocketnow_cli.cli.update_pending_order") as update:
+            with self.assertRaisesRegex(RuntimeError, "HTTP 400"):
+                _submit_order(self.api, object(), self.args)
+        self.api.prepay.assert_called_once()
+        state = update.call_args.args[1]
+        self.assertEqual(state["status"], "requires_reconciliation")
+        self.assertEqual(state["submissionFailure"], {"type": "RocketNowHTTPError", "httpStatus": 400})
+
     def test_confirmation_uses_only_prepay_response_values(self):
         state = {"status": "awaiting_payment", "prepay": {
             "transactionToken": None,
@@ -93,6 +111,20 @@ class OrderCommandTests(unittest.TestCase):
              patch("rocketnow_cli.cli.update_pending_order"):
             result = _confirm_order(self.api, "a" * 64)
         self.assertEqual(result["status"], "requires_reconciliation")
+
+    def test_confirmation_error_is_recorded_without_replay(self):
+        state = {"status": "awaiting_payment", "prepay": {
+            "transactionToken": None, "paymentAuthToken": "auth-token",
+            "orderId": 123, "amount": 1000,
+        }}
+        self.api.confirm_payment_result.side_effect = RocketNowAPIError({"code": "43125", "message": "failed"})
+        with patch("rocketnow_cli.cli.load_pending_order", return_value=state), \
+             patch("rocketnow_cli.cli.update_pending_order") as update:
+            with self.assertRaisesRegex(RuntimeError, "API 43125"):
+                _confirm_order(self.api, "a" * 64)
+        self.api.confirm_payment_result.assert_called_once()
+        self.assertEqual(update.call_args.args[1]["status"], "requires_reconciliation")
+        self.assertEqual(update.call_args.args[1]["confirmationFailure"]["apiCode"], "43125")
 
     def test_address_change_stops_purchase_review(self):
         self.api.default_address.return_value = {"customerAddressId": 21}

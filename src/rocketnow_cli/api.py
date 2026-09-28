@@ -71,6 +71,12 @@ class RocketNowAPI:
             {"keyWord": keyword, "latitude": latitude, "longitude": longitude},
         )
 
+    def category_list(self, category_id: int = 0) -> Any:
+        return self._get("store.get_clp_categories", {"categoryId": category_id})
+
+    def category_stores(self, category_id: int) -> Any:
+        return self._get("store.get_clp", {"categoryId": category_id})
+
     def store_with_menu(
         self,
         store_id: str,
@@ -104,6 +110,9 @@ class RocketNowAPI:
 
     def default_address(self) -> Any:
         return self._get("account.get_default_address")
+
+    def web_session(self) -> Any:
+        return self._get("customer.get_coupang_session")
 
     def calculate_cart_price(self, body: JsonObject) -> Any:
         return self._post("checkout.calculate_cart_price", body)

@@ -19,6 +19,8 @@ python -m pip install -e .
 rocketnow --help
 ```
 
+チェックアウトから直接実行する場合は `./bin/rocketnow --help` も使えます。Python依存ライブラリは事前に必要です。
+
 `auth login` のブラウザ方式を試す場合だけNode.js、Playwright、Chromeが必要です。リポジトリ内で `npm install` を実行し、`ROCKETNOW_PLAYWRIGHT_ROOT` をこのリポジトリの絶対パスに設定します。`ROCKETNOW_BROWSER=webkit` を使う場合は `npx playwright install webkit` も実行します。ログイン初期画面は開きますが、MacのChromeとWebKitではSMS認証画面がSSOから403で拒否されました。現在この方式だけでのログインは完了していません。
 
 ## 認証
@@ -37,7 +39,12 @@ APIはP-256鍵によるDPoP署名を使います。アクセストークンは�
 rocketnow auth status
 rocketnow address
 rocketnow search 寿司 --lat 35.68 --lon 139.76
+rocketnow categories
+rocketnow category 2
+rocketnow categories --app-session
+rocketnow category 2 --app-session
 rocketnow store 12345 --lat 35.68 --lon 139.76
+rocketnow store 12345 --app-session
 rocketnow dish 12345 67890
 rocketnow orders
 rocketnow payment-methods
@@ -46,6 +53,8 @@ rocketnow checkout-review-draft draft.json
 ```
 
 緯度・経度は `address` の結果を使います。店舗IDと商品IDは `search` → `store` → `dish` で確認します。下記のIDはドラフトの構造例です。
+
+`categories` はカテゴリ一覧、`category <id>` はそのカテゴリの店舗一覧を表示します。通常はCLIの認証済みAPIを使います。`--app-session` はiPhoneを8080番のプロキシにつないでアプリで既に開いたカテゴリの**捕捉済み通信**を読みます。`store <id> --app-session` はアプリでその店舗を開いてメニューが捕捉されていれば、商品名と価格を表示します。この場合は緯度・経度を指定する必要がありません。CLIのトークンが期限切れでも閲覧できますが、まだアプリで開いていないカテゴリや店舗は表示できません。出力の `source` は新しい通信なら `app_proxy_live`、保存済みの通信なら `app_proxy_cache` です。このモードはアプリのDPoPトークンをCLIへ流用せず、注文も開始しません。mitmwebのトークンが起動コマンドから読めない場合は対話入力し、非対話実行では `ROCKETNOW_MITMWEB_PASSWORD` 環境変数を使用します。カテゴリの店舗カードだけでは詳細メニューや会計額は確定しないため、注文候補は店舗・商品を開いて確認してください。
 
 ```json
 {

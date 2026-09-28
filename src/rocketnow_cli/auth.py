@@ -34,6 +34,22 @@ def jwt_exp(access_token: str) -> int:
     return int(json.loads(decoded)["exp"])
 
 
+def exchange_session_metadata(data: dict) -> dict[str, str | None]:
+    """Extract optional web-session credentials without rejecting an API login."""
+    token_hash = data.get("accessTokenHash")
+    legacy = data.get("legacySessionInfo")
+    if isinstance(legacy, str):
+        try:
+            legacy = json.loads(legacy)
+        except (ValueError, TypeError):
+            legacy = None
+    sso_header = legacy.get("ssoAuthHeader") if isinstance(legacy, dict) else None
+    return {
+        "access_token_hash": token_hash if isinstance(token_hash, str) and token_hash else None,
+        "sso_auth_header": sso_header if isinstance(sso_header, str) and sso_header else None,
+    }
+
+
 class LoginFlow:
     def __init__(self) -> None:
         self.verifier = _b64url(secrets.token_bytes(48))
@@ -152,6 +168,7 @@ class LoginFlow:
             self.device_id, self.pcid,
             app_session_id=self.app_session_id,
             member_pcid=self.member_pcid,
+            **exchange_session_metadata(data),
         )
 
 
@@ -166,6 +183,8 @@ class Session:
         token_binding: str | None = None,
         app_session_id: str | None = None,
         member_pcid: str | None = None,
+        access_token_hash: str | None = None,
+        sso_auth_header: str | None = None,
     ) -> None:
         self.access_token = access_token
         self.signer = signer
@@ -175,6 +194,8 @@ class Session:
         self.token_binding = token_binding or _b64url(secrets.token_bytes(16))
         self.app_session_id = app_session_id
         self.member_pcid = member_pcid
+        self.access_token_hash = access_token_hash
+        self.sso_auth_header = sso_auth_header
 
     @property
     def expired(self) -> bool:
@@ -201,6 +222,8 @@ def save_session(session: Session, path: Path | None = None) -> Path:
         "token_binding": session.token_binding,
         "app_session_id": session.app_session_id,
         "member_pcid": session.member_pcid,
+        "access_token_hash": session.access_token_hash,
+        "sso_auth_header": session.sso_auth_header,
     }
     fd, temp_name = tempfile.mkstemp(prefix=".session-", dir=target.parent)
     try:
@@ -228,6 +251,8 @@ def load_session(path: Path | None = None) -> Session:
         data.get("token_binding"),
         data.get("app_session_id"),
         data.get("member_pcid"),
+        data.get("access_token_hash"),
+        data.get("sso_auth_header"),
     )
     if not data.get("device_id") or not data.get("pcid") or not data.get("token_binding"):
         save_session(session, target)

@@ -20,7 +20,9 @@ _package_root = Path(__file__).resolve().parents[2]
 if str(_package_root) not in sys.path:
     sys.path.insert(0, str(_package_root))
 
-from rocketnow_cli.auth import Session, jwt_exp, save_session, session_path  # noqa: E402
+from rocketnow_cli.auth import (  # noqa: E402
+    Session, exchange_session_metadata, jwt_exp, save_session, session_path,
+)
 from rocketnow_cli.dpop import DPoPSigner  # noqa: E402
 
 
@@ -90,6 +92,7 @@ class PairProxy:
                 pcid=_request_header(headers, "X-Eats-Pcid"),
                 app_session_id=_request_header(headers, "X-Eats-Session-Id"),
                 member_pcid=_request_header(headers, "X-Member-Pcid"),
+                **exchange_session_metadata(data),
             )
             save_session(session, session_path())
         except (KeyError, TypeError, ValueError, UnicodeDecodeError, OSError) as exc:

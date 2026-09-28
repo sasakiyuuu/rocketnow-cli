@@ -1,10 +1,15 @@
-#!/bin/sh
-set -eu
-project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-if [ -d "$project_dir/.deps" ]; then
-  PYTHONPATH="$project_dir/src:$project_dir/.deps${PYTHONPATH:+:$PYTHONPATH}"
-else
-  PYTHONPATH="$project_dir/src${PYTHONPATH:+:$PYTHONPATH}"
-fi
-export PYTHONPATH
-exec python3 -m rocketnow_cli.cli "$@"
+#!/usr/bin/env python3
+"""Run the checkout CLI directly from this checkout, including local dependencies."""
+
+from pathlib import Path
+import sys
+
+project = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(project / "src"))
+dependencies = project / ".deps"
+if dependencies.is_dir():
+    sys.path.insert(0, str(dependencies))
+
+from rocketnow_cli.cli import main  # noqa: E402
+
+main()

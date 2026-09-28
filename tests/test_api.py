@@ -37,6 +37,18 @@ class RocketNowAPITests(unittest.TestCase):
             {"keyWord": "寿司", "latitude": 35.6, "longitude": 139.7},
         )
 
+    def test_category_list_defaults_to_root(self):
+        self.assertEqual(self.api.category_list(), {"ok": True})
+        self.assert_call("store.get_clp_categories", {"categoryId": 0})
+
+    def test_category_list_accepts_parent(self):
+        self.api.category_list(42)
+        self.assert_call("store.get_clp_categories", {"categoryId": 42})
+
+    def test_category_stores(self):
+        self.api.category_stores(42)
+        self.assert_call("store.get_clp", {"categoryId": 42})
+
     def test_store_with_menu_defaults_source_type(self):
         self.api.store_with_menu("s1", 35.6, 139.7)
         self.assert_call(
@@ -75,6 +87,10 @@ class RocketNowAPITests(unittest.TestCase):
     def test_default_address(self):
         self.assertEqual(self.api.default_address(), {"ok": True})
         self.assert_call("account.get_default_address", None)
+
+    def test_web_session(self):
+        self.api.web_session()
+        self.assert_call("customer.get_coupang_session", None)
 
     def test_calculate_cart_price_sends_body(self):
         body = {"storeId": "s1", "items": [{"dishId": "d2", "quantity": 2}]}

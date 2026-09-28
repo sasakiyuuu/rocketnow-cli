@@ -77,10 +77,57 @@ class PrepayBuilderTests(unittest.TestCase):
         self.assertEqual(body["deviceInfo"]["uuid"], "fake-device-uuid")
         self.assertEqual(body["items"], self.checkout_request["items"])
 
+    def test_paypay_uses_observed_payment_fields_without_card_id(self):
+        self.checkout_request["payMethodCode"] = "PAYPAY"
+        method = {"payMethodCode": "PAYPAY", "payMethodId": None,
+                  "maskingPayMethodNumber": None, "payMethodName": "PayPay", "payMethodType": "PAYPAY"}
+        with patch.object(FakeAPI, "payment_methods", return_value={"payMethodList": [method]}):
+            body = self.build()
+        self.assertNotIn("payMethodId", body["payment"])
+        self.assertEqual(body["payment"]["maskingPayMethodNumber"], "")
+        self.assertEqual(body["payment"]["payMethodCorporateCode"], "PAYPAY")
+
     def test_missing_search_tracking_is_rejected(self):
         del self.draft["searchId"]
         with self.assertRaisesRegex(ValueError, "searchId"):
             self.build()
+
+    def test_applied_fee_coupons_are_preserved_without_preview_ui_fields(self):
+        self.checkout_request["coupons"] = [{"couponId": "stale-selection"}]
+        applied = [
+            {
+                "couponId": 11, "description": None, "discountPrice": 252,
+                "layer": 1, "stampReward": False, "type": "DELIVERY_BENEFIT",
+                "userPromotionId": 31, "title": "Free delivery",
+                "isSelected": True, "displayDiscountPrice": "252 yen",
+            },
+            {
+                "couponId": 12, "description": "Service fee discount",
+                "discountPrice": 100, "layer": 2, "stampReward": False,
+                "type": "SERVICE_FEE", "userPromotionId": 32,
+                "title": "No service fee", "isSelected": True,
+            },
+        ]
+        self.preview["coupons"] = applied
+        body = self.build()
+        self.assertEqual(body["coupons"], [
+            {
+                "couponId": 11, "description": "", "discountPrice": 252,
+                "layer": 1, "stampReward": False, "type": "DELIVERY_BENEFIT",
+                "userPromotionId": 31,
+            },
+            {
+                "couponId": 12, "description": "Service fee discount",
+                "discountPrice": 100, "layer": 2, "stampReward": False,
+                "type": "SERVICE_FEE", "userPromotionId": 32,
+            },
+        ])
+        self.assertIsNone(applied[0]["description"])
+
+    def test_no_applied_coupons_does_not_reuse_checkout_selection(self):
+        self.checkout_request["coupons"] = [{"couponId": "stale-selection"}]
+        self.preview["coupons"] = []
+        self.assertEqual(self.build()["coupons"], [])
 
     def test_changed_fractional_total_is_rejected(self):
         self.preview["requestedAmount"] = 2400.5

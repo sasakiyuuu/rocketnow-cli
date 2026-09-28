@@ -154,7 +154,9 @@ class HTTPTransport:
         if self.session.member_pcid:
             headers["X-Member-Pcid"] = self.session.member_pcid
         if body is not None:
-            headers["Content-Type"] = "application/json"
+            headers["Content-Type"] = "application/json; charset=utf-8"
+        if path in ("/endpoint/checkout.get_payment_methods", "/endpoint/checkout.prepay", "/endpoint/checkout.confirm_payment_result"):
+            headers["Cookie"] = "x-eats-uuid=" + self.session.device_id
         if path.startswith(("/endpoint/store.", "/endpoint/checkout.", "/endpoint/ads.splash_screen")):
             headers["X-Eats-Location"] = self._location_header(params)
         req = request.Request(url, data=body, method=method, headers=headers)

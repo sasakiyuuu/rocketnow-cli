@@ -7,11 +7,12 @@ import getpass
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 
-from .api import RocketNowAPI
+from .api import RocketNowAPI, RocketNowAPIError
 from .auth import LoginFlow, load_session, save_session, session_path
 from .cart import build_cart_request, build_checkout_request
 from .review import summarize_checkout
@@ -25,7 +26,7 @@ from .order import (
     update_pending_order,
 )
 from .mitmweb_import import import_payment_config
-from .transport import HTTPTransport
+from .transport import HTTPTransport, RocketNowHTTPError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -52,11 +53,18 @@ def _parser() -> argparse.ArgumentParser:
     autocomplete = sub.add_parser("autocomplete")
     autocomplete.add_argument("keyword")
 
+    categories = sub.add_parser("categories", help="List restaurant categories")
+    categories.add_argument("--app-session", action="store_true", help="Read captured iPhone app traffic")
+    category = sub.add_parser("category", help="List stores in a category")
+    category.add_argument("category_id", type=int)
+    category.add_argument("--app-session", action="store_true", help="Read captured iPhone app traffic")
+
     store = sub.add_parser("store", help="Show a store and its menu")
     store.add_argument("store_id")
-    store.add_argument("--lat", type=float, required=True)
-    store.add_argument("--lon", type=float, required=True)
+    store.add_argument("--lat", type=float)
+    store.add_argument("--lon", type=float)
     store.add_argument("--source-type", default="SEARCH")
+    store.add_argument("--app-session", action="store_true", help="Read a menu captured from the iPhone app")
 
     dish = sub.add_parser("dish", help="Show a dish and its options")
     dish.add_argument("store_id")
@@ -127,7 +135,8 @@ def _auth_pair_proxy() -> dict:
     print(f"スマホのプロキシを同じMacのポート{pair_port}に変更し、ロケットナウでログアウト→ログインしてください。", file=sys.stderr)
     print("CLIの認証後はスマホのプロキシを元の設定に戻し、アプリで再ログインしてください。", file=sys.stderr)
     result = subprocess.run(
-        ["mitmdump", "-q", "--listen-host", "0.0.0.0", "--listen-port", str(pair_port), "-s", str(addon)],
+        ["mitmdump", "-q", "--listen-host", "0.0.0.0", "--listen-port", str(pair_port),
+         "--ignore-hosts", r"^member\.rocketnow\.co\.jp(?::443)?$", "-s", str(addon)],
         check=False,
     )
     after = target.stat().st_mtime_ns if target.exists() else None
@@ -146,6 +155,8 @@ def _json_file(path: Path) -> dict:
 
 
 def _with_preferred_card(draft: dict) -> dict:
+    if draft.get("payMethodCode", "GP_CARD") != "GP_CARD":
+        return draft
     if draft.get("payMethodId") is not None:
         return draft
     try:
@@ -181,7 +192,7 @@ def _build_review(api: RocketNowAPI, draft: dict, pay_method_code: str) -> tuple
 
 def _build_purchase_review(api: RocketNowAPI, session, draft: dict) -> tuple[dict, dict]:
     draft = _with_preferred_card(draft)
-    checkout_request, preview, _, address = _build_review(api, draft, "GP_CARD")
+    checkout_request, preview, _, address = _build_review(api, draft, draft.get("payMethodCode", "GP_CARD"))
     tracked_draft = resolve_search_tracking(api, draft)
     prepay_body = build_prepay_request(
         api, session, checkout_request, preview, tracked_draft, load_payment_config()
@@ -195,23 +206,45 @@ def _submit_order(api: RocketNowAPI, session, args: argparse.Namespace) -> dict:
     if not draft.get("searchId") or not draft.get("searchJourneyId"):
         draft = dict(draft, **review_tracking(args.approve_hash))
     body, review = _build_purchase_review(api, session, draft)
-    if review["requestedAmount"] != args.approve_amount:
+    return _submit_reviewed_order(api, body, review, args.approve_hash, args.approve_amount)
+
+
+def _submit_reviewed_order(api: RocketNowAPI, body: dict, review: dict, approve_hash: str, approve_amount: int) -> dict:
+    """Submit one fresh, verified purchase intent without replaying it."""
+    if review["requestedAmount"] != approve_amount:
         raise ValueError("Checkout changed since approval; run order check again")
-    verify_review(args.approve_hash, body)
-    pending_id = args.approve_hash
+    verify_review(approve_hash, body)
+    pending_id = approve_hash
     create_pending_order(pending_id, review)
+    state = load_pending_order(pending_id)
+    state["prepayRequest"] = body
+    update_pending_order(pending_id, state)
     consume_review(pending_id)
     try:
         prepay = api.prepay(body)
-    except Exception:
+    except Exception as exc:
+        state = load_pending_order(pending_id)
+        state["status"] = "requires_reconciliation"
+        failure = {"type": type(exc).__name__}
+        detail = ""
+        if isinstance(exc, RocketNowHTTPError):
+            failure["httpStatus"] = exc.status
+            detail = f" (HTTP {exc.status})"
+        elif isinstance(exc, RocketNowAPIError) and isinstance(exc.error, dict):
+            code = exc.error.get("code")
+            if isinstance(code, int) or (isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,40}", code)):
+                failure["apiCode"] = code
+                detail = f" (API {code})"
+        state["submissionFailure"] = failure
+        update_pending_order(pending_id, state)
         raise RuntimeError(
-            "Purchase submission outcome is unknown; check the app before trying again"
+            "Purchase submission outcome is unknown" + detail + "; check the app before trying again"
         ) from None
     if not isinstance(prepay, dict) or not prepay.get("success"):
         raise RuntimeError("Purchase was not accepted; check the app before trying again")
     state = load_pending_order(pending_id)
     if (
-        prepay.get("amount") != args.approve_amount
+        prepay.get("amount") != approve_amount
         or not prepay.get("orderId")
         or not prepay.get("paymentAuthToken")
         or not prepay.get("paymentUrl")
@@ -247,14 +280,61 @@ def _confirm_order(api: RocketNowAPI, pending_id: str) -> dict:
     update_pending_order(pending_id, state)
     try:
         result = api.confirm_payment_result(body)
-    except Exception:
+    except Exception as exc:
+        state["status"] = "requires_reconciliation"
+        failure = {"type": type(exc).__name__}
+        detail = ""
+        if isinstance(exc, RocketNowHTTPError):
+            failure["httpStatus"] = exc.status
+            detail = f" (HTTP {exc.status})"
+        elif isinstance(exc, RocketNowAPIError) and isinstance(exc.error, dict):
+            code = exc.error.get("code")
+            if isinstance(code, int) or (isinstance(code, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,40}", code)):
+                failure["apiCode"] = code
+                detail = f" (API {code})"
+        state["confirmationFailure"] = failure
+        update_pending_order(pending_id, state)
         raise RuntimeError(
-            "Payment confirmation outcome is unknown; check the app before trying again"
+            "Payment confirmation outcome is unknown" + detail + "; check the app before trying again"
         ) from None
     state["status"] = "approved" if result.get("status") == "PAYMENT_APPROVED" else "requires_reconciliation"
     state["paymentStatus"] = result.get("status")
     update_pending_order(pending_id, state)
     return {"pendingId": pending_id, "status": state["status"], "paymentStatus": state["paymentStatus"]}
+
+
+def _safe_categories(items: object) -> list[dict]:
+    if not isinstance(items, list):
+        return []
+    return [
+        {key: item[key] for key in ("id", "name") if key in item}
+        for item in items
+        if isinstance(item, dict) and "id" in item and "name" in item
+    ]
+
+
+def _safe_stores(items: object) -> list[dict]:
+    if not isinstance(items, list):
+        return []
+    visible = ("id", "name", "estimatedDeliveryTime", "openStatus", "reviewRating")
+    return [
+        {key: item[key] for key in visible if key in item}
+        for item in items
+        if isinstance(item, dict) and "id" in item and "name" in item
+    ]
+
+
+def _safe_menu(entry: dict) -> dict:
+    dishes = entry.get("dishes")
+    return {
+        "id": entry.get("id"),
+        "name": entry.get("name"),
+        "dishes": [
+            {key: dish[key] for key in ("id", "name", "price", "available") if key in dish}
+            for dish in dishes
+            if isinstance(dish, dict) and "id" in dish and "name" in dish
+        ] if isinstance(dishes, list) else [],
+    }
 
 
 def run(args: argparse.Namespace) -> object:
@@ -293,8 +373,46 @@ def run(args: argparse.Namespace) -> object:
             "paymentConfigured": bool(config.get("merchantMallKey") and config.get("deviceUserAgent")),
             "preferredCardConfigured": bool(config.get("preferredPayMethodId")),
         }
+    if args.command in ("categories", "category", "store") and args.app_session:
+        from .proxy_catalog import load_app_catalog
+
+        catalog = load_app_catalog()
+        if args.command == "store":
+            entry = catalog.get("menuByStore", {}).get(str(args.store_id))
+            if not isinstance(entry, dict):
+                raise ValueError("Store menu has not been captured; open this store in the iPhone app on proxy port 8080")
+            return {
+                "source": catalog.get("source", "app_proxy_cache"),
+                "capturedAt": catalog.get("capturedAt"),
+                **_safe_menu(entry),
+            }
+        if args.command == "categories":
+            return {
+                "source": catalog.get("source", "app_proxy_cache"),
+                "capturedAt": catalog.get("capturedAt"),
+                "categories": _safe_categories(catalog.get("categories", [])),
+            }
+        entry = catalog.get("categoryStores", {}).get(str(args.category_id))
+        if entry is None:
+            raise ValueError("Category has not been captured in the iPhone app yet")
+        return {
+            "source": catalog.get("source", "app_proxy_cache"),
+            "categoryId": args.category_id,
+            "name": entry.get("name"),
+            "capturedAt": entry.get("capturedAt"),
+            "stores": _safe_stores(entry.get("stores", [])),
+        }
+    if args.command == "store" and (args.lat is None or args.lon is None):
+        raise ValueError("--lat and --lon are required for store unless --app-session is used")
     session = load_session()
     api = RocketNowAPI(HTTPTransport(session))
+    if args.command == "categories":
+        data = api.category_list()
+        return {"source": "api", "title": data.get("title"), "categories": _safe_categories(data.get("list", []))}
+    if args.command == "category":
+        data = api.category_stores(args.category_id)
+        stores = [item.get("entity", {}).get("data", {}) for item in data.get("entityList", []) if item.get("viewType") == "storeCardWithMenu"]
+        return {"source": "api", "categoryId": args.category_id, "stores": _safe_stores(stores), "hasMore": bool(data.get("nextToken"))}
     if args.command == "search":
         return api.search(args.keyword, args.lat, args.lon)
     if args.command == "autocomplete":

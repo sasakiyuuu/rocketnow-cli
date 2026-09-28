@@ -31,10 +31,10 @@ class FakeRequest:
 
 
 class FakeResponse:
-    def __init__(self, token: str, status_code: int = 200, token_type: str = "DPoP"):
+    def __init__(self, token: str, status_code: int = 200, token_type: str = "DPoP", metadata=None):
         self.status_code = status_code
         self.content = json.dumps(
-            {"rData": {"accessToken": token, "tokenType": token_type}}
+            {"rData": {"accessToken": token, "tokenType": token_type, **(metadata or {})}}
         ).encode()
 
 
@@ -216,6 +216,24 @@ class PairProxyTests(unittest.TestCase):
             self.assertEqual(save.call_count, 1)
             self.assertIsNone(addon.session)
             shutdown.assert_called_once()
+
+    def test_exchange_captures_legacy_credentials_and_tolerates_malformed_metadata(self):
+        for legacy, expected in (
+            ({"ssoAuthHeader": "example-sso"}, "example-sso"),
+            (json.dumps({"ssoAuthHeader": "example-sso"}), "example-sso"),
+            ("malformed", None),
+        ):
+            with self.subTest(legacy=legacy):
+                addon = pair_proxy.PairProxy()
+                flow = FakeFlow(response=FakeResponse(fake_token(), metadata={
+                    "accessTokenHash": "example-hash", "legacySessionInfo": legacy,
+                }))
+                addon.request(flow)
+                with patch.object(pair_proxy, "save_session") as save:
+                    addon.response(flow)
+                session = save.call_args.args[0]
+                self.assertEqual(session.access_token_hash, "example-hash")
+                self.assertEqual(session.sso_auth_header, expected)
 
 
 if __name__ == "__main__":
