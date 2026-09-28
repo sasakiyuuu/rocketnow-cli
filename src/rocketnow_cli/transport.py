@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 import time
 from urllib import error, parse, request
 
@@ -69,8 +70,10 @@ class HTTPTransport:
                 json.dumps(jwk, separators=(",", ":"), sort_keys=True).encode()
             ).digest())
             if any(new_payload.get(key) != old_payload.get(key) for key in (
-                "iss", "aud", "sub", "client_id", "auth_time", "scp",
+                "iss", "sub", "client_id", "auth_time", "scp",
             )):
+                return False
+            if not _compatible_audience(old_payload.get("aud"), new_payload.get("aud")):
                 return False
             if new_payload.get("cnf", {}).get("jkt") != thumbprint:
                 return False
@@ -99,6 +102,16 @@ class HTTPTransport:
             probe_error = exc
         if self.session.access_token != old_token:
             return True
+        try:
+            from .app_session_refresh import local_proxy_candidates
+
+            for authorization in local_proxy_candidates(self.session):
+                if self._accept_rotated_token(authorization):
+                    return True
+        except (OSError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError,
+                error.URLError, json.JSONDecodeError):
+            # The phone proxy is optional; direct API probes remain available.
+            pass
         if not expired:
             # A normal authenticated request can still rotate the token. Avoid
             # probing on every request if this early attempt did not offer one.
@@ -182,8 +195,10 @@ class HTTPTransport:
             headers["X-Member-Pcid"] = self.session.member_pcid
         if body is not None:
             headers["Content-Type"] = "application/json; charset=utf-8"
-        if path in ("/endpoint/checkout.get_payment_methods", "/endpoint/checkout.prepay", "/endpoint/checkout.confirm_payment_result"):
+        if path in ("/endpoint/account.member_extra_info", "/endpoint/checkout.get_payment_methods", "/endpoint/checkout.prepay", "/endpoint/checkout.confirm_payment_result"):
             headers["Cookie"] = "x-eats-uuid=" + self.session.device_id
+        if path == "/endpoint/account.member_extra_info" and self._location is not None:
+            headers["X-Eats-Location"] = self._location_header(None)
         if path.startswith(("/endpoint/store.", "/endpoint/checkout.", "/endpoint/ads.splash_screen")):
             headers["X-Eats-Location"] = self._location_header(params)
         req = request.Request(url, data=body, method=method, headers=headers)
@@ -217,6 +232,20 @@ class HTTPTransport:
 
 def _b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+
+def _compatible_audience(old: object, new: object) -> bool:
+    """Allow the observed trailing placeholder while retaining every audience."""
+    if isinstance(old, str):
+        return bool(old) and new == old
+    if not isinstance(old, list) or not isinstance(new, list):
+        return False
+    for audiences in (old, new):
+        if (not audiences or any(not isinstance(value, str) or not value for value in audiences)
+                or len(audiences) != len(set(audiences))
+                or all(value == "-" for value in audiences)):
+            return False
+    return new == old or ("-" not in old and new == [*old, "-"])
 
 
 def _jwt_payload(token: str) -> dict:

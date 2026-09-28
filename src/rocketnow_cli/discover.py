@@ -142,6 +142,7 @@ def scan_catalog(
                              "errorType": type(exc).__name__})
             continue
         stores_scanned += 1
+        seen_dish_ids: set[str] = set()
         for dish in dishes:
             price = dish.get("salePrice")
             if isinstance(price, bool) or not isinstance(price, (int, float)) or not math.isfinite(price):
@@ -150,6 +151,10 @@ def scan_catalog(
                 continue
             if dish.get("displayStatus") != "ON_SALE" or dish.get("id") is None or not isinstance(dish.get("name"), str):
                 continue
+            dish_key = str(dish["id"])
+            if dish_key in seen_dish_ids:
+                continue
+            seen_dish_ids.add(dish_key)
             products.append({
                 "storeId": store["storeId"], "store": store["store"],
                 "categoryIds": list(store["categoryIds"]),

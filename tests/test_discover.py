@@ -35,6 +35,14 @@ class FakeAPI:
 
 
 class CatalogScanTests(unittest.TestCase):
+    def test_duplicate_dish_in_multiple_menu_groups_is_returned_once(self):
+        dish = {"id": 5, "name": "Dinner", "salePrice": 800,
+                "displayStatus": "ON_SALE"}
+        api = FakeAPI({1: [card(10)]}, {10: [dish, dict(dish)]})
+        with patch("rocketnow_cli.discover.time.sleep"):
+            result = scan_catalog(api, 35.6, 139.7, [1])
+        self.assertEqual([item["id"] for item in result["candidateProducts"]], [5])
+
     def test_round_robin_dedupe_all_available_dishes_and_no_private_fields(self):
         api = FakeAPI(
             {1: [card(10, "A", estimatedDeliveryTime="20分", privateToken="secret"),

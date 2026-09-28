@@ -37,6 +37,9 @@ class TransportTests(unittest.TestCase):
     def setUp(self):
         self.session = Session("fake-access-token", DPoPSigner.generate(), int(time.time()) + 3600)
         self.transport = HTTPTransport(self.session)
+        proxy = patch("rocketnow_cli.app_session_refresh.local_proxy_candidates", return_value=[])
+        proxy.start()
+        self.addCleanup(proxy.stop)
 
     def test_get_signs_observed_endpoint_and_excludes_query_from_htu(self):
         address = {"data": {"regionId": 1, "latitude": 35.0, "longitude": 139.0,
@@ -84,6 +87,14 @@ class TransportTests(unittest.TestCase):
         with patch("rocketnow_cli.transport.request.urlopen", return_value=Response(b'{"data":{"payMethodList":[]}}')) as send:
             self.transport.request("GET", "/endpoint/checkout.get_payment_methods")
         self.assertEqual(send.call_args.args[0].get_header("Cookie"), "x-eats-uuid=" + self.session.device_id)
+
+    def test_member_extra_info_uses_observed_device_cookie_and_known_location(self):
+        self.transport._location = {"regionId": 1, "latitude": 35.0, "longitude": 139.0}
+        with patch("rocketnow_cli.transport.request.urlopen", return_value=Response(b'{"data":{}}')) as send:
+            self.transport.request("GET", "/endpoint/account.member_extra_info")
+        req = send.call_args.args[0]
+        self.assertEqual(req.get_header("Cookie"), "x-eats-uuid=" + self.session.device_id)
+        self.assertEqual(json.loads(req.get_header("X-eats-location"))["regionId"], 1)
 
     def test_expired_session_tries_harmless_refresh_then_stops_without_rotation(self):
         self.session.expires_at = int(time.time()) - 1
@@ -136,6 +147,49 @@ class TransportTests(unittest.TestCase):
         )), patch("rocketnow_cli.transport.save_session") as save:
             with self.assertRaisesRegex(RuntimeError, "renewal was not offered"):
                 self.transport.request("GET", "/endpoint/account.member")
+        save.assert_not_called()
+
+    def test_rotation_accepts_observed_trailing_placeholder_audience(self):
+        now = int(time.time())
+        claims = {
+            "iss": "issuer", "aud": ["https://www.rocketnow.co.jp"],
+            "sub": "account", "client_id": "client", "auth_time": now - 14_500,
+            "scp": ["offline", "eats"], "cnf": {"jkt": thumbprint(self.session.signer)},
+            "iat": now - 14_410, "exp": now - 10,
+        }
+        self.session.access_token = token(claims)
+        self.session.expires_at = claims["exp"]
+        rotated = token(dict(claims, aud=[*claims["aud"], "-"], iat=now, exp=now + 14_400))
+        with patch("rocketnow_cli.transport.save_session") as save:
+            self.assertTrue(self.transport._accept_rotated_token("DPoP " + rotated))
+        self.assertEqual(self.session.access_token, rotated)
+        save.assert_called_once_with(self.session)
+
+    def test_rotation_rejects_unobserved_or_malformed_audience_changes(self):
+        now = int(time.time())
+        claims = {
+            "iss": "issuer", "aud": ["https://www.rocketnow.co.jp"],
+            "sub": "account", "client_id": "client", "auth_time": now - 14_500,
+            "scp": ["offline", "eats"], "cnf": {"jkt": thumbprint(self.session.signer)},
+            "iat": now - 14_410, "exp": now - 10,
+        }
+        original = token(claims)
+        self.session.access_token = original
+        self.session.expires_at = claims["exp"]
+        rejected = [
+            ["https://www.rocketnow.co.jp", "https://other.example"],
+            ["-", "https://www.rocketnow.co.jp"],
+            ["https://www.rocketnow.co.jp", "-", "-"],
+            ["https://www.rocketnow.co.jp", ""],
+            [],
+            ["-"],
+        ]
+        with patch("rocketnow_cli.transport.save_session") as save:
+            for audience in rejected:
+                with self.subTest(audience=audience):
+                    candidate = token(dict(claims, aud=audience, iat=now, exp=now + 14_400))
+                    self.assertFalse(self.transport._accept_rotated_token("DPoP " + candidate))
+                    self.assertEqual(self.session.access_token, original)
         save.assert_not_called()
 
     def test_refresh_tries_observed_splash_endpoint_when_address_does_not_rotate(self):
@@ -191,6 +245,83 @@ class TransportTests(unittest.TestCase):
             ("GET", "/endpoint/account.member_extra_info"),
             ("GET", "/endpoint/account.get_default_address"),
         ])
+
+    def test_proxy_candidate_rotates_after_direct_probe_without_replaying_purchase(self):
+        now = int(time.time())
+        claims = {
+            "iss": "issuer", "aud": ["https://www.rocketnow.co.jp"],
+            "sub": "account", "client_id": "client", "auth_time": now - 14_500,
+            "scp": ["offline", "eats"], "cnf": {"jkt": thumbprint(self.session.signer)},
+            "iat": now - 14_410, "exp": now - 10,
+        }
+        self.session.access_token = token(claims)
+        self.session.expires_at = claims["exp"]
+        self.transport._location = {"regionId": 1, "latitude": 35.0, "longitude": 139.0}
+        rotated = token(dict(claims, aud=[*claims["aud"], "-"], iat=now, exp=now + 14_400))
+        with patch("rocketnow_cli.transport.request.urlopen", side_effect=[
+            Response(b'{"data":{}}'), Response(b'{"data":{"success":true}}'),
+        ]) as send, patch("rocketnow_cli.app_session_refresh.local_proxy_candidates",
+                         return_value=["DPoP " + rotated]) as proxy, \
+             patch("rocketnow_cli.transport.save_session") as save:
+            result = self.transport.request("POST", "/endpoint/checkout.prepay", json_body={"requestedAmount": 1000})
+        self.assertTrue(result["data"]["success"])
+        proxy.assert_called_once_with(self.session)
+        self.assertEqual([call.args[0].get_method() for call in send.call_args_list], ["GET", "POST"])
+        self.assertEqual(send.call_args_list[1].args[0].get_header("Authorization"), "DPoP " + rotated)
+        save.assert_called_once_with(self.session)
+
+    def test_invalid_proxy_candidate_falls_back_then_fails_closed(self):
+        now = int(time.time())
+        claims = {
+            "iss": "issuer", "aud": ["https://www.rocketnow.co.jp"],
+            "sub": "account", "client_id": "client", "auth_time": now - 14_500,
+            "scp": ["offline", "eats"], "cnf": {"jkt": thumbprint(self.session.signer)},
+            "iat": now - 14_410, "exp": now - 10,
+        }
+        self.session.access_token = token(claims)
+        self.session.expires_at = claims["exp"]
+        self.transport._location = {"regionId": 1, "latitude": 35.0, "longitude": 139.0}
+        bad_key = token(dict(claims, cnf={"jkt": "wrong-key"}, iat=now, exp=now + 14_400))
+        with patch("rocketnow_cli.transport.request.urlopen",
+                   side_effect=lambda *_args, **_kwargs: Response(b'{"data":{}}')) as send, \
+             patch("rocketnow_cli.app_session_refresh.local_proxy_candidates",
+                   return_value=["DPoP " + bad_key]), \
+             patch("rocketnow_cli.transport.save_session") as save:
+            with self.assertRaisesRegex(RuntimeError, "renewal was not offered"):
+                self.transport.request("POST", "/endpoint/checkout.prepay", json_body={"requestedAmount": 1000})
+        self.assertEqual([call.args[0].get_method() for call in send.call_args_list], ["GET", "GET"])
+        save.assert_not_called()
+
+    def test_unavailable_proxy_keeps_expired_direct_fallback(self):
+        self.session.expires_at = int(time.time()) - 1
+        with patch("rocketnow_cli.app_session_refresh.local_proxy_candidates",
+                   side_effect=RuntimeError("proxy unavailable")), \
+             patch("rocketnow_cli.transport.request.urlopen",
+                   side_effect=lambda *_args, **_kwargs: Response(b'{"data":{}}')) as send:
+            with self.assertRaisesRegex(RuntimeError, "renewal was not offered"):
+                self.transport.request("GET", "/endpoint/account.member")
+        self.assertEqual([call.args[0].get_method() for call in send.call_args_list], ["GET", "GET"])
+
+    def test_pre_expiry_proxy_rotation_is_accepted_before_requested_endpoint(self):
+        now = int(time.time())
+        claims = {
+            "iss": "issuer", "aud": ["https://www.rocketnow.co.jp"],
+            "sub": "account", "client_id": "client", "auth_time": now - 14_500,
+            "scp": ["offline", "eats"], "cnf": {"jkt": thumbprint(self.session.signer)},
+            "iat": now - 14_410, "exp": now + 8 * 60,
+        }
+        self.session.access_token = token(claims)
+        self.session.expires_at = claims["exp"]
+        rotated = token(dict(claims, aud=[*claims["aud"], "-"], iat=now, exp=now + 14_400))
+        with patch("rocketnow_cli.app_session_refresh.local_proxy_candidates",
+                   return_value=["DPoP " + rotated]), \
+             patch("rocketnow_cli.transport.request.urlopen", side_effect=[
+                 Response(b'{"data":{}}'), Response(b'{"data":{"ok":true}}'),
+             ]) as send, patch("rocketnow_cli.transport.save_session") as save:
+            self.assertTrue(self.transport.request("GET", "/endpoint/account.member")["data"]["ok"])
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(send.call_args_list[1].args[0].get_header("Authorization"), "DPoP " + rotated)
+        save.assert_called_once_with(self.session)
 
 
 if __name__ == "__main__":
