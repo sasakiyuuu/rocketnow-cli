@@ -112,6 +112,28 @@ class OrderCommandTests(unittest.TestCase):
             result = _confirm_order(self.api, "a" * 64)
         self.assertEqual(result["status"], "requires_reconciliation")
 
+    def test_accepted_payment_requires_matching_approved_active_order(self):
+        state = {"status": "awaiting_payment", "prepayRequest": {"storeId": 30772},
+                 "prepay": {"transactionToken": None, "paymentAuthToken": "auth-token",
+                            "orderId": 123, "amount": 936}}
+        self.api.confirm_payment_result.return_value = {"status": "ACCEPTED"}
+        self.api.order_history.return_value = {"orderHistories": [{
+            "orderId": 123, "storeId": 30772, "totalAmount": 936,
+            "statusValue": "PREPARING", "items": [{"paymentStatus": "APPROVED"}],
+        }]}
+        with patch("rocketnow_cli.cli.load_pending_order", return_value=state), \
+             patch("rocketnow_cli.cli.update_pending_order"):
+            result = _confirm_order(self.api, "a" * 64)
+        self.assertEqual(result["status"], "approved")
+        self.api.order_history.assert_called_once_with(False)
+
+        state["status"] = "awaiting_payment"
+        self.api.order_history.return_value["orderHistories"][0]["totalAmount"] = 1000
+        with patch("rocketnow_cli.cli.load_pending_order", return_value=state), \
+             patch("rocketnow_cli.cli.update_pending_order"):
+            result = _confirm_order(self.api, "a" * 64)
+        self.assertEqual(result["status"], "requires_reconciliation")
+
     def test_confirmation_error_is_recorded_without_replay(self):
         state = {"status": "awaiting_payment", "prepay": {
             "transactionToken": None, "paymentAuthToken": "auth-token",

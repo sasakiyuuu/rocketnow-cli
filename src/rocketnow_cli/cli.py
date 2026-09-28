@@ -308,7 +308,21 @@ def _confirm_order(api: RocketNowAPI, pending_id: str) -> dict:
         raise RuntimeError(
             "Payment confirmation outcome is unknown" + detail + "; check the app before trying again"
         ) from None
-    state["status"] = "approved" if result.get("status") == "PAYMENT_APPROVED" else "requires_reconciliation"
+    approved = result.get("status") == "PAYMENT_APPROVED"
+    if result.get("status") == "ACCEPTED":
+        try:
+            histories = api.order_history(False).get("orderHistories") or []
+            approved = any(
+                str(order.get("orderId")) == str(prepay["orderId"])
+                and order.get("storeId") == state["prepayRequest"].get("storeId")
+                and order.get("totalAmount") == prepay["amount"]
+                and order.get("statusValue") not in ("CANCELED", "CANCELLED")
+                and any(item.get("paymentStatus") == "APPROVED" for item in order.get("items") or [])
+                for order in histories
+            )
+        except (KeyError, TypeError, ValueError, RuntimeError, OSError):
+            approved = False
+    state["status"] = "approved" if approved else "requires_reconciliation"
     state["paymentStatus"] = result.get("status")
     update_pending_order(pending_id, state)
     return {"pendingId": pending_id, "status": state["status"], "paymentStatus": state["paymentStatus"]}
