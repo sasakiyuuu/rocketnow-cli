@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from http.cookiejar import CookieJar
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -98,6 +99,36 @@ def _numeric_id(value: Any) -> str | None:
     return value if value.isascii() and value.isdecimal() and len(value) <= 20 else None
 
 
+def _flow_coordinates(flow: dict[str, Any]) -> tuple[float, float] | None:
+    headers = (flow.get("request") or {}).get("headers") or []
+    if isinstance(headers, dict):
+        headers = headers.items()
+    if not isinstance(headers, (list, tuple)) and not hasattr(headers, "__iter__"):
+        return None
+    raw = next((item[1] for item in headers
+                if isinstance(item, (list, tuple)) and len(item) == 2 and
+                isinstance(item[0], str) and item[0].lower() == "x-eats-location"), None)
+    if not isinstance(raw, str):
+        return None
+    try:
+        location = json.loads(raw)
+        latitude, longitude = float(location["latitude"]), float(location["longitude"])
+        if (math.isfinite(latitude) and math.isfinite(longitude) and
+                -90 <= latitude <= 90 and -180 <= longitude <= 180):
+            return latitude, longitude
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _nearby(a: tuple[float, float], b: tuple[float, float]) -> bool:
+    """Keep capture groups within roughly 1.5 km without persisting coordinates."""
+    midlatitude = math.radians((a[0] + b[0]) / 2)
+    north = (a[0] - b[0]) * 111.2
+    east = (a[1] - b[1]) * 111.2 * math.cos(midlatitude)
+    return math.hypot(north, east) <= 1.5
+
+
 def _categories(data: dict[str, Any]) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     for item in data.get("list") or []:
@@ -172,6 +203,22 @@ def catalog_from_flows(
     latest_categories: tuple[float, str] | None = None
     latest_clp: dict[str, tuple[float, str]] = {}
     latest_menu: dict[str, tuple[float, str]] = {}
+    anchor: tuple[float, tuple[float, float]] | None = None
+    for flow in flows:
+        if not isinstance(flow, dict):
+            continue
+        req, resp = flow.get("request") or {}, flow.get("response") or {}
+        timestamp = req.get("timestamp_start")
+        if (req.get("host") != "csg.rocketnow.co.jp" or
+                req.get("method") != "GET" or resp.get("status_code") != 200 or
+                not isinstance(timestamp, (int, float)) or
+                not now - _MAX_AGE_SECONDS <= timestamp <= now + 60 or
+                parse.urlsplit(req.get("path") or "").path != "/endpoint/store.get_clp"):
+            continue
+        coordinates = _flow_coordinates(flow)
+        if coordinates and (anchor is None or timestamp > anchor[0]):
+            anchor = (timestamp, coordinates)
+
     for flow in flows:
         if not isinstance(flow, dict):
             continue
@@ -193,10 +240,16 @@ def catalog_from_flows(
             if latest_categories is None or timestamp > latest_categories[0]:
                 latest_categories = (timestamp, flow_id)
         elif parsed.path.endswith("get_clp"):
+            if anchor and (not (coordinates := _flow_coordinates(flow)) or
+                           not _nearby(anchor[1], coordinates)):
+                continue
             cid = _numeric_id((params.get("categoryId") or [None])[0])
             if cid and (cid not in latest_clp or timestamp > latest_clp[cid][0]):
                 latest_clp[cid] = (timestamp, flow_id)
         else:
+            if anchor and (not (coordinates := _flow_coordinates(flow)) or
+                           not _nearby(anchor[1], coordinates)):
+                continue
             sid = _numeric_id((params.get("storeId") or [None])[0])
             if sid and (sid not in latest_menu or timestamp > latest_menu[sid][0]):
                 latest_menu[sid] = (timestamp, flow_id)

@@ -1,5 +1,6 @@
 """The app-proxy catalog keeps public food fields and rejects private data."""
 
+import json
 import unittest
 
 from rocketnow_cli.proxy_catalog import catalog_from_flows
@@ -71,6 +72,41 @@ class ProxyCatalogTests(unittest.TestCase):
                 [flow("old", "/endpoint/store.get_clp?categoryId=8", now - 90000)],
                 lambda _: {"data": {}}, now=now,
             )
+
+    def test_categories_and_menus_do_not_mix_two_delivery_areas(self):
+        now = 1_800_000_000
+        roppongi = json.dumps({"latitude": 35.663, "longitude": 139.731})
+        shibuya = json.dumps({"latitude": 35.659, "longitude": 139.708})
+        captures = [
+            flow("names", "/endpoint/store.get_clp_categories?categoryId=0", now - 60),
+            flow("roppongi-category", "/endpoint/store.get_clp?categoryId=8", now - 50),
+            flow("roppongi-menu", "/endpoint/store.get_store_with_menu?storeId=1", now - 40),
+            flow("shibuya-category", "/endpoint/store.get_clp?categoryId=2", now - 20),
+            flow("shibuya-menu", "/endpoint/store.get_store_with_menu?storeId=2", now - 10),
+        ]
+        for capture, location in zip(captures, [
+            roppongi, roppongi, roppongi, shibuya, shibuya,
+        ]):
+            capture["request"]["headers"].append(["X-Eats-Location", location])
+        responses = {
+            "names": {"data": {"list": [
+                {"id": 8, "name": "お弁当"}, {"id": 2, "name": "洋食"},
+            ]}},
+            "roppongi-category": {"data": {"entityList": [{
+                "viewType": "storeCardWithMenu", "entity": {"data": {"id": 1, "name": "港区の店"}}
+            }]}},
+            "shibuya-category": {"data": {"entityList": [{
+                "viewType": "storeCardWithMenu", "entity": {"data": {"id": 2, "name": "渋谷の店"}}
+            }]}},
+            "roppongi-menu": {"data": {"id": 1, "name": "港区の店", "menus": []}},
+            "shibuya-menu": {"data": {"id": 2, "name": "渋谷の店", "menus": []}},
+        }
+        result = catalog_from_flows(captures, responses.__getitem__, now=now)
+        self.assertEqual(set(result["categoryStores"]), {"2"})
+        self.assertEqual(set(result["menuByStore"]), {"2"})
+        self.assertNotIn("latitude", str(result))
+        self.assertNotIn("longitude", str(result))
+        self.assertNotIn("港区の店", str(result))
 
 
 if __name__ == "__main__":
