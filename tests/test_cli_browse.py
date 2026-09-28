@@ -57,6 +57,43 @@ class CategoryCLITests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "--lat and --lon"):
                 run(_parser().parse_args(["store", "9"]))
 
+    def test_captured_dishes_across_stores_are_filtered_and_sorted(self):
+        module = types.ModuleType("rocketnow_cli.proxy_catalog")
+        module.load_app_catalog = lambda: {
+            "source": "app_proxy_live", "capturedAt": "2026-09-28T12:00:00Z",
+            "menuByStore": {
+                "10": {"id": 10, "name": "和食屋", "address": "omit", "dishes": [
+                    {"id": 103, "name": "唐揚げ", "price": 900, "available": True, "latitude": 35.6},
+                    {"id": 104, "name": "高い弁当", "price": 1200, "available": True},
+                ]},
+                "9": {"id": 9, "name": "洋食屋", "dishes": [
+                    {"id": 91, "name": "カレー", "price": 800, "available": True},
+                    {"id": 92, "name": "売り切れ", "price": 500, "available": False},
+                ]},
+            },
+        }
+        with patch.dict(sys.modules, {"rocketnow_cli.proxy_catalog": module}), patch(
+            "rocketnow_cli.cli.load_session", side_effect=AssertionError("session read")
+        ):
+            result = run(_parser().parse_args(["dishes", "--app-session", "--max-price", "1000"]))
+        self.assertEqual(result["source"], "app_proxy_live")
+        self.assertEqual(result["count"], 2)
+        self.assertEqual([row["name"] for row in result["dishes"]], ["カレー", "唐揚げ"])
+        self.assertEqual(result["dishes"][0], {
+            "storeId": 9, "store": "洋食屋", "id": 91, "name": "カレー", "price": 800, "available": True,
+        })
+        self.assertNotIn("address", str(result))
+        self.assertNotIn("latitude", str(result))
+
+    def test_captured_dishes_requires_menus_and_nonnegative_price(self):
+        module = types.ModuleType("rocketnow_cli.proxy_catalog")
+        module.load_app_catalog = lambda: {"menuByStore": {}}
+        with patch.dict(sys.modules, {"rocketnow_cli.proxy_catalog": module}):
+            with self.assertRaisesRegex(ValueError, "No store menus"):
+                run(_parser().parse_args(["dishes", "--app-session"]))
+            with self.assertRaisesRegex(ValueError, "nonnegative"):
+                run(_parser().parse_args(["dishes", "--app-session", "--max-price", "-1"]))
+
     def test_missing_app_category_is_clear(self):
         module = types.ModuleType("rocketnow_cli.proxy_catalog")
         module.load_app_catalog = lambda: {"categories": [], "categoryStores": {}}

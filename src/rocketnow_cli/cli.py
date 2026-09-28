@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -70,6 +71,16 @@ def _parser() -> argparse.ArgumentParser:
     dish.add_argument("store_id")
     dish.add_argument("dish_id")
     dish.add_argument("--delivery-type", default="DELIVERY")
+
+    dishes = sub.add_parser("dishes", help="List products captured from iPhone store menus")
+    dishes.add_argument("--app-session", action="store_true", required=True)
+    dishes.add_argument("--max-price", type=int)
+
+    discover = sub.add_parser("discover-dishes", help="Scan nearby store menus for dishes by item price")
+    discover.add_argument("--max-price", type=int, default=1000)
+    discover.add_argument("--limit-stores", type=int, default=100)
+    discover.add_argument("--categories", default="1,2,3,6,8,9,11,17,21,22", help="Comma-separated category IDs")
+    discover.add_argument("--delay", type=float, default=0.3, help="Seconds between store requests (minimum 0.2)")
 
     orders = sub.add_parser("orders", help="Show order history")
     orders.add_argument("--in-progress", action="store_true")
@@ -337,7 +348,71 @@ def _safe_menu(entry: dict) -> dict:
     }
 
 
+def _captured_dishes(catalog: dict, max_price: int | None) -> dict:
+    if max_price is not None and max_price < 0:
+        raise ValueError("--max-price must be nonnegative")
+    menus = catalog.get("menuByStore")
+    if not isinstance(menus, dict) or not menus:
+        raise ValueError("No store menus have been captured; open stores in the iPhone app on proxy port 8080")
+    rows = []
+    for store_id, menu in menus.items():
+        if not isinstance(menu, dict):
+            continue
+        store_name = menu.get("name")
+        if not isinstance(store_name, str):
+            continue
+        for dish in menu.get("dishes", []):
+            if not isinstance(dish, dict):
+                continue
+            price = dish.get("price")
+            if (dish.get("available") is not True or
+                    not isinstance(price, int) or isinstance(price, bool) or price < 0 or
+                    (max_price is not None and price > max_price) or
+                    not isinstance(dish.get("name"), str) or "id" not in dish):
+                continue
+            rows.append({
+                "storeId": menu.get("id", store_id), "store": store_name,
+                "id": dish["id"], "name": dish["name"],
+                "price": price, "available": True,
+            })
+    rows.sort(key=lambda row: (row["price"], str(row["store"]), str(row["name"]), str(row["storeId"]), str(row["id"])))
+    return {
+        "source": catalog.get("source", "app_proxy_cache"),
+        "capturedAt": catalog.get("capturedAt"),
+        "count": len(rows),
+        "dishes": rows,
+    }
+
+
 def run(args: argparse.Namespace) -> object:
+    if args.command == "discover-dishes":
+        if args.max_price <= 0:
+            raise ValueError("--max-price must be positive")
+        if not 1 <= args.limit_stores <= 100:
+            raise ValueError("--limit-stores must be between 1 and 100")
+        if not math.isfinite(args.delay) or args.delay < 0.2:
+            raise ValueError("--delay must be at least 0.2 seconds")
+        parts = args.categories.split(",")
+        if not parts or any(not part.strip().isdigit() for part in parts):
+            raise ValueError("--categories must be comma-separated positive integer IDs")
+        category_ids = list(dict.fromkeys(int(part.strip()) for part in parts))
+        if any(category_id <= 0 for category_id in category_ids):
+            raise ValueError("--categories must be comma-separated positive integer IDs")
+        session = load_session()
+        api = RocketNowAPI(HTTPTransport(session))
+        address = api.default_address()
+        latitude, longitude = address.get("latitude"), address.get("longitude")
+        if (isinstance(latitude, bool) or isinstance(longitude, bool) or
+                not isinstance(latitude, (int, float)) or not isinstance(longitude, (int, float)) or
+                not math.isfinite(latitude) or not math.isfinite(longitude) or
+                not -90 <= latitude <= 90 or not -180 <= longitude <= 180):
+            raise ValueError("Saved delivery address has no valid coordinates")
+        from .discover import scan_catalog
+
+        return scan_catalog(
+            api, latitude, longitude, category_ids,
+            max_price=args.max_price, limit_stores=args.limit_stores, delay_seconds=args.delay,
+        )
     if args.command == "auth":
         if args.action == "login":
             return _auth_login()
@@ -373,10 +448,12 @@ def run(args: argparse.Namespace) -> object:
             "paymentConfigured": bool(config.get("merchantMallKey") and config.get("deviceUserAgent")),
             "preferredCardConfigured": bool(config.get("preferredPayMethodId")),
         }
-    if args.command in ("categories", "category", "store") and args.app_session:
+    if args.command in ("categories", "category", "store", "dishes") and args.app_session:
         from .proxy_catalog import load_app_catalog
 
         catalog = load_app_catalog()
+        if args.command == "dishes":
+            return _captured_dishes(catalog, args.max_price)
         if args.command == "store":
             entry = catalog.get("menuByStore", {}).get(str(args.store_id))
             if not isinstance(entry, dict):

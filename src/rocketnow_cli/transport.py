@@ -19,9 +19,13 @@ class RocketNowHTTPError(RuntimeError):
 
 
 class HTTPTransport:
+    _EARLY_REFRESH_WINDOW = 10 * 60
+    _EARLY_REFRESH_BACKOFF = 60
+
     def __init__(self, session: Session) -> None:
         self.session = session
         self._location: dict | None = None
+        self._next_early_refresh_at = 0.0
 
     @property
     def location_address_id(self) -> int | None:
@@ -82,30 +86,53 @@ class HTTPTransport:
 
     def refresh(self) -> bool:
         """Ask a harmless account endpoint to rotate the bound access token."""
-        if time.time() < self.session.expires_at:
+        now = time.time()
+        expired = now >= self.session.expires_at
+        if not expired and (self.session.expires_at - now > self._EARLY_REFRESH_WINDOW
+                            or now < self._next_early_refresh_at):
             return False
         old_token = self.session.access_token
+        probe_error: RocketNowHTTPError | error.URLError | None = None
+        try:
+            self._send("GET", "/endpoint/account.member_extra_info")
+        except (RocketNowHTTPError, error.URLError) as exc:
+            probe_error = exc
+        if self.session.access_token != old_token:
+            return True
+        if not expired:
+            # A normal authenticated request can still rotate the token. Avoid
+            # probing on every request if this early attempt did not offer one.
+            self._next_early_refresh_at = now + self._EARLY_REFRESH_BACKOFF
+            return False
+
         try:
             result = self._send("GET", "/endpoint/account.get_default_address")
-            if self.session.access_token == old_token:
-                address = result.get("data")
-                if isinstance(address, dict) and "regionId" in address:
+        except (RocketNowHTTPError, error.URLError) as exc:
+            probe_error = exc
+        else:
+            if self.session.access_token != old_token:
+                return True
+            address = result.get("data")
+            if isinstance(address, dict) and "regionId" in address:
+                try:
+                    self._set_location(address)
+                except (KeyError, TypeError, ValueError):
+                    pass
+                else:
                     try:
-                        self._set_location(address)
-                    except (KeyError, TypeError, ValueError):
-                        pass
-                    else:
                         self._send(
                             "POST", "/endpoint/ads.splash_screen",
                             json_body={"regionId": address["regionId"]},
                         )
-        except RocketNowHTTPError as exc:
-            raise RuntimeError(f"Session renewal failed (HTTP {exc.status}); run `rocketnow auth pair-proxy`") from None
-        except error.URLError:
+                    except (RocketNowHTTPError, error.URLError) as exc:
+                        probe_error = exc
+        if self.session.access_token != old_token:
+            return True
+        if isinstance(probe_error, RocketNowHTTPError):
+            raise RuntimeError(f"Session renewal failed (HTTP {probe_error.status}); run `rocketnow auth pair-proxy`") from None
+        if isinstance(probe_error, error.URLError):
             raise RuntimeError("Session renewal unavailable; check the network and retry") from None
-        if self.session.access_token == old_token:
-            raise RuntimeError("Session renewal was not offered; run `rocketnow auth pair-proxy`")
-        return True
+        raise RuntimeError("Session renewal was not offered; run `rocketnow auth pair-proxy`")
 
     def _send(
         self,
@@ -183,7 +210,7 @@ class HTTPTransport:
         method = method.upper()
         if method not in ("GET", "POST"):
             raise ValueError("Unsupported HTTP method")
-        if time.time() >= self.session.expires_at:
+        if self.session.expires_at - time.time() <= self._EARLY_REFRESH_WINDOW:
             self.refresh()
         return self._send(method, path, params=params, json_body=json_body)
 
