@@ -42,6 +42,18 @@ class PaymentBrowserTests(unittest.TestCase):
         self.assertTrue(config["cookies"][0]["secure"])
         self.assertTrue(config["cookies"][0]["httpOnly"])
 
+    def test_reviewed_non_thousand_yen_amount_is_supported(self):
+        session = Session("fake", DPoPSigner.generate(), 1_900_000_000,
+                          access_token_hash="fake-hash", sso_auth_header="fake-sso")
+        config = browser_config(session, "https://payment.rocketnow.co.jp/payments/i18n/payment",
+                                936, Path("/tmp/private"),
+                                "Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 RocketNow/1.15.1")
+        self.assertEqual(config["expectedAmount"], 936)
+        with self.assertRaisesRegex(ValueError, "reviewed whole-yen"):
+            browser_config(session, "https://payment.rocketnow.co.jp/payments/i18n/payment",
+                           0, Path("/tmp/private"),
+                           "Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 RocketNow/1.15.1")
+
 
 if __name__ == "__main__":
     unittest.main()

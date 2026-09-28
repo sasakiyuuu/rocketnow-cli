@@ -23,8 +23,8 @@ def browser_config(session: Session, payment_url: str, amount: int, output_dir: 
         raise ValueError("Payment web credentials are unavailable; pair the CLI again")
     if not user_agent.startswith("Mozilla/5.0 ") or "AppleWebKit/" not in user_agent:
         raise ValueError("Payment browser requires the captured WebView User-Agent, separate from deviceUserAgent")
-    if amount != 1000:
-        raise ValueError("This PayPay browser flow is authorized for 1000 JPY only")
+    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+        raise ValueError("Payment browser requires the reviewed whole-yen amount")
     app_version = os.environ.get("ROCKETNOW_APP_VERSION", "1.15.1")
     ios_version = os.environ.get("ROCKETNOW_IOS_VERSION", "26.6.1")
     headers = {

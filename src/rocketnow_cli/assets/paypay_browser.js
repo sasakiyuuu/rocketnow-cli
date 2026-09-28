@@ -229,7 +229,9 @@ async function main() {
     if (input.length > 1024 * 1024) throw new Error("Configuration too large");
   }
   const config = JSON.parse(input);
-  if (config.expectedAmount !== 1000) throw new Error("Expected authorized amount of 1000 JPY");
+  if (!Number.isSafeInteger(config.expectedAmount) || config.expectedAmount <= 0) {
+    throw new Error("Expected a reviewed whole-yen amount");
+  }
   if (!isMerchant(new URL(config.paymentUrl))) throw new Error("Expected merchant payment URL");
   if (typeof config.accessToken !== "string" || !config.accessToken) throw new Error("Missing access token");
   if (!path.isAbsolute(config.outputDir || "")) throw new Error("Private outputDir is required");
