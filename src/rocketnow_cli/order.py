@@ -28,16 +28,19 @@ def resolve_search_tracking(api: RocketNowAPI, draft: dict[str, Any]) -> dict[st
     store_id = int(draft["storeId"])
     for entry in result.get("entityList") or []:
         data = (entry.get("entity") or {}).get("data") or {}
-        if not isinstance(data, dict) or data.get("storeId") is None:
+        if not isinstance(data, dict):
             continue
-        if int(data["storeId"]) != store_id:
+        result_store_id = data.get("storeId", data.get("id"))
+        if result_store_id is None or int(result_store_id) != store_id:
             continue
         logging = data.get("logging") or {}
-        if logging.get("searchId") and logging.get("searchJourneyId"):
+        search_id = data.get("searchId") or logging.get("searchId")
+        journey_id = data.get("searchJourneyId") or logging.get("searchJourneyId")
+        if search_id and journey_id:
             return dict(
                 draft,
-                searchId=logging["searchId"],
-                searchJourneyId=logging["searchJourneyId"],
+                searchId=search_id,
+                searchJourneyId=journey_id,
             )
     raise ValueError("Selected store was not found in the keyword search results")
 

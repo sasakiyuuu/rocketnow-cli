@@ -144,6 +144,18 @@ class PrepayBuilderTests(unittest.TestCase):
         self.assertEqual(draft["searchId"], "search-1")
         self.assertEqual(draft["searchJourneyId"], "journey-1")
 
+    def test_search_tracking_accepts_current_store_card_fields(self):
+        class CurrentAPI(FakeAPI):
+            def search(self, keyword, latitude, longitude):
+                return {"entityList": [{"entity": {"data": {
+                    "id": 10, "name": "鳥幸", "searchId": "search-2",
+                    "searchJourneyId": "journey-2",
+                }}}]}
+
+        draft = resolve_search_tracking(CurrentAPI(), {"storeId": 10, "keyword": "鳥幸"})
+        self.assertEqual((draft["searchId"], draft["searchJourneyId"]),
+                         ("search-2", "journey-2"))
+
     def test_pending_order_prevents_duplicate_purchase_attempt(self):
         review_hash = "a" * 64
         with tempfile.TemporaryDirectory() as directory:
